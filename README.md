@@ -10,11 +10,14 @@ Cross-platform by design (CMake + `std::filesystem` + `std::thread` + standalone
 
 This is being built incrementally, in public, with documentation written as each piece lands — not reconstructed afterward. See [`DESIGN.md`](DESIGN.md) for the running design log (what's built, why each decision was made, what's next).
 
-- [ ] **Tier 1 — storage engine**: WAL, memtable, SSTables, bloom filters, compaction, crash recovery, core `Put`/`Get`/`Delete`/`RangeScan` API
+- [x] Cross-platform build/CI skeleton + platform-abstraction layer (`sync_file`)
+- [x] Write-Ahead Log — durable, CRC32-checked, crash/corruption recovery tested
+- [ ] Memtable
+- [ ] SSTables + bloom filters
+- [ ] Compaction
+- [ ] Core `Put`/`Get`/`Delete`/`RangeScan` API + crash-recovery integration test
 - [ ] **Tier 2 — networked server**: TCP server over the engine, a benchmark client with real throughput numbers, a recorded crash-and-recover demo
 - [ ] **Tier 3 (stretch)** — basic primary-replica log replication
-
-Currently in progress: the cross-platform build/CI skeleton and the platform-abstraction layer (`sync_file`) that everything else builds on.
 
 ## Building
 

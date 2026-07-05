@@ -9,6 +9,8 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 
 add_executable(lsmdb_tests
   platform/file_sync_test.cpp
+  core/crc32_test.cpp
+  core/wal_test.cpp
 )
 target_link_libraries(lsmdb_tests PRIVATE lsmdb Catch2::Catch2WithMain)
 
