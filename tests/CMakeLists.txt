@@ -14,6 +14,7 @@ add_executable(lsmdb_tests
   core/memtable_test.cpp
   core/bloom_filter_test.cpp
   core/sstable_test.cpp
+  core/compaction_test.cpp
 )
 target_link_libraries(lsmdb_tests PRIVATE lsmdb Catch2::Catch2WithMain)
 

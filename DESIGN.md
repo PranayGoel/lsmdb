@@ -89,3 +89,23 @@ This is worth being precise about: `maybe_contains()` returning true doesn't mea
 **What's tested:** the bloom filter's no-false-negatives guarantee, empty-filter behavior, measured false-positive rate at 10K-key scale, byte-serialization round-tripping, and rejecting a truncated buffer; the SSTable's create-time sorted-input validation, correct get()/read_all() behavior across present keys/absent keys/tombstones, and file-format validation (bad magic number, too-small file) failing loudly rather than reading garbage. All 33 tests pass under Debug, ASan, UBSan, and TSan.
 
 **Next:** compaction — merging multiple SSTables into fewer, larger ones, and the leveled-vs-size-tiered decision that comes with it.
+
+---
+
+## Entry 4 — Compaction
+
+**Decision: size-tiered compaction, not leveled.**
+Leveled compaction (RocksDB/LevelDB's default) organizes SSTables into levels with non-overlapping key ranges *within* a level, and compacts by merging one level into the next — this bounds read amplification well at large scale, but correctness depends on maintaining those per-level key-range invariants, which is real implementation complexity. Size-tiered — merge the full current set of SSTables into one new file once their count crosses a threshold — is simpler to get right and entirely adequate at this project's scale. Named as a deliberate tradeoff in `compaction.h`'s module comment, not a missing feature.
+
+**The consequence of "always merge everything" that makes tombstone-dropping safe: every compaction in this design is implicitly a *full* compaction.**
+This is worth being precise about, since it's the kind of detail that's easy to get subtly wrong: a tombstone can only be safely dropped once you're certain no *older* data for that key exists anywhere that the tombstone would otherwise need to keep shadowing. In a leveled scheme, a compaction might merge only levels 2 and 3 while level 4 still has older data for some key — dropping a tombstone there would incorrectly resurrect that older value. Because this project's size-tiered scheme always merges the *entire* current SSTable set at once, there is never any older data left outside the merge — so `compact()` can always drop tombstones outright. `compaction_test.cpp`'s two tombstone tests are what actually pin this down: a tombstone in the *newer* input correctly removes the key entirely (`"a tombstone in the newer SSTable removes the key entirely"`), and — the case that's easy to get backwards — a tombstone in an *older* input does NOT suppress a real value written more recently (`"a tombstone in an OLDER SSTable does not shadow a real value written more recently"`).
+
+**Decision: resolve same-key conflicts via a stable sort by key, not a k-way heap merge.**
+A classic LSM-tree merge uses a min-heap of per-SSTable iterators for genuine streaming (never materializing all entries in memory at once). This project instead reads every input SSTable fully into memory (`read_all()`, already a documented scope tradeoff from Entry 3) and does a single stable sort by key — entries are appended in `source_index` order (oldest input first), and a *stable* sort preserves that relative order within any run of equal keys, so the last entry in each group is guaranteed to be the one from the highest `source_index` (the newest write). This is simpler to implement correctly than a heap-based streaming merge and produces identical results at this project's scale; the true streaming k-way merge is the natural next step if SSTables need to grow larger than available memory.
+
+**Decision: `compact()` doesn't delete or modify its input files.**
+Kept as a pure "N inputs → 1 output" function specifically so it's simple to test in isolation (as the 7 tests above do) without needing to also reason about file-deletion side effects. File lifecycle — deciding when the old SSTables are safe to remove after a successful compaction — is `Db`'s responsibility once it exists, not compaction's.
+
+**What's tested:** non-overlapping merges, same-key conflict resolution across 2 and 3 overlapping SSTables (confirming the truly newest value wins, not just "a" value), both tombstone-ordering directions described above, and the two trivial-but-worth-checking edge cases (a single-input passthrough, an empty input list). All 40 tests pass under Debug, ASan, UBSan, and TSan.
+
+**Next:** `Db` — the class that actually ties WAL + memtable + SSTables + compaction together into one coherent `Put`/`Get`/`Delete`/`RangeScan` API, plus the crash-recovery integration test that's the real proof this all works end-to-end, not just component-by-component.
