@@ -1,5 +1,9 @@
 // The actual, runnable database server: opens a Db, listens on a TCP port,
 // and serves the protocol documented in include/lsmdb/server/protocol.h.
+// Optionally runs as a Tier 3 replica of another running lsmdb_server via
+// --replica-of <primary-host> <primary-port>: a replica rejects ordinary
+// client writes (see Server's read_only parameter) and instead applies
+// every write replicated from its primary through ReplicationClient.
 //
 // Prints "LISTENING <port>" as its very first line of stdout, flushed
 // immediately -- both a human-readable startup confirmation and, not
@@ -8,6 +12,7 @@
 // OS-assigned (port 0) listener actually bound to before it starts sending
 // commands.
 #include "lsmdb/db.h"
+#include "lsmdb/server/replication_client.h"
 #include "lsmdb/server/server.h"
 
 #include <asio.hpp>
@@ -18,19 +23,38 @@
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: lsmdb_server <data-dir> <port>\n";
+    std::cerr << "usage: lsmdb_server <data-dir> <port> [--replica-of <primary-host> "
+                 "<primary-port>]\n";
     return 1;
   }
 
   std::string data_dir = argv[1];
   unsigned short port = static_cast<unsigned short>(std::stoi(argv[2]));
 
+  bool is_replica = false;
+  std::string primary_host;
+  std::string primary_port;
+  if (argc >= 6 && std::string(argv[3]) == "--replica-of") {
+    is_replica = true;
+    primary_host = argv[4];
+    primary_port = argv[5];
+  }
+
   try {
     lsmdb::Db db(data_dir);
     asio::io_context io_context;
-    lsmdb::server::Server server(io_context, port, db);
+    lsmdb::server::Server server(io_context, port, db, /*read_only=*/is_replica);
 
     std::cout << "LISTENING " << server.local_port() << std::endl;
+
+    // Kept alive by its own shared_from_this() chain (same pattern as
+    // Session) -- once started, it needs nothing further from main().
+    if (is_replica) {
+      std::cout << "REPLICA-OF " << primary_host << " " << primary_port << std::endl;
+      std::make_shared<lsmdb::server::ReplicationClient>(io_context, primary_host, primary_port,
+                                                           db)
+          ->start();
+    }
 
     // SIGINT only (not SIGTERM): asio::signal_set's SIGINT handling is
     // uniformly portable across POSIX and Windows (translated to a console

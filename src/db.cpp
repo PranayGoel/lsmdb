@@ -123,36 +123,45 @@ std::optional<std::string> Db::get(const std::string& key) const {
   return std::nullopt;  // never written, anywhere
 }
 
-std::vector<std::pair<std::string, std::string>> Db::range_scan(const std::string& start,
-                                                                  const std::string& end) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-
+std::map<std::string, std::optional<std::string>> Db::merge_all_locked() const {
   // Apply layers oldest-to-newest into one sorted map, so a later (newer)
   // layer's write for a key naturally overwrites an earlier one -- the same
   // newest-wins principle as get(), just expressed as "apply in order"
   // instead of "search backward and stop at the first hit." Simpler to read
   // for a multi-key merge across many sources; a real production
-  // implementation would use each SSTable's sorted index to seek directly
-  // to `start` and only read up to `end`, rather than loading every entry
-  // via read_all() and filtering -- documented here as the same kind of
-  // "correct but not the fastest possible" scope tradeoff as read_all()
-  // itself (see sstable.h).
+  // implementation would use each SSTable's sorted index to seek directly to
+  // a requested range rather than loading every entry via read_all() and
+  // filtering afterward -- documented here as the same kind of "correct but
+  // not the fastest possible" scope tradeoff as read_all() itself (see
+  // sstable.h).
   std::map<std::string, std::optional<std::string>> merged;
   for (const auto& sstable : sstables_) {  // oldest to newest
     for (auto& entry : sstable->read_all()) {
-      if (entry.key >= start && entry.key < end) {
-        merged[entry.key] = entry.is_tombstone ? std::nullopt : std::optional<std::string>(entry.value);
-      }
+      merged[entry.key] = entry.is_tombstone ? std::nullopt : std::optional<std::string>(entry.value);
     }
   }
   for (const auto& entry : memtable_.entries()) {  // newest layer, applied last
-    if (entry.key >= start && entry.key < end) {
-      merged[entry.key] = entry.value;
-    }
+    merged[entry.key] = entry.value;
   }
+  return merged;
+}
+
+std::vector<std::pair<std::string, std::string>> Db::range_scan(const std::string& start,
+                                                                  const std::string& end) const {
+  std::lock_guard<std::mutex> lock(mutex_);
 
   std::vector<std::pair<std::string, std::string>> result;
-  for (auto& [key, value] : merged) {
+  for (auto& [key, value] : merge_all_locked()) {
+    if (key >= start && key < end && value.has_value()) result.emplace_back(key, *value);
+  }
+  return result;
+}
+
+std::vector<std::pair<std::string, std::string>> Db::all_entries() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  std::vector<std::pair<std::string, std::string>> result;
+  for (auto& [key, value] : merge_all_locked()) {
     if (value.has_value()) result.emplace_back(key, *value);  // tombstones never surface to the caller
   }
   return result;

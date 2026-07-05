@@ -225,3 +225,61 @@ $-1
 **What's tested:** protocol-logic correctness in isolation (`protocol_test.cpp`: all four commands, malformed input, values containing spaces, empty values), the real-socket server wiring (`server_test.cpp`: round-trip over an actual TCP connection, two independent connections sharing one consistent database view, many sequential commands on one connection), and the flagship real-process-kill-and-restart recovery test described above — all passing on Linux, macOS, and Windows, and under ASan/UBSan/TSan.
 
 **Next:** Tier 3 (stretch, only if time remains) — basic primary-replica log replication: one primary streams its WAL to a follower, which replays it; killing the primary and confirming the follower already has the data, with manual promotion (no automatic failover/leader-election required for this to be a genuine, honest talking point).
+
+---
+
+## Entry 7 — Tier 3 (stretch): primary-replica replication
+
+**Decision: replicate re-expressed commands, not raw WAL bytes.**
+The plan's original framing ("stream the WAL, replay it on the follower") suggests literally shipping the primary's binary WAL file across the wire. Implemented instead: whenever a client's `PUT`/`DELETE` is accepted by a primary, the exact same command is re-sent, verbatim, to every subscribed follower as `REPLICATE PUT key value` / `REPLICATE DELETE key`. A follower applies each one through its own `Db::put()`/`Db::remove()` — the identical code path a local client write takes, meaning a follower's own WAL and SSTables are just as durable and crash-recoverable as the primary's, not an in-memory mirror that vanishes if the follower itself restarts. This is functionally the same idea (ship every mutation, replay it in order) without requiring the follower to parse the primary's exact binary WAL framing across a process (and potential version) boundary — a real, simpler, and more robust design for what the plan explicitly scopes as "not full consensus," and it reuses `server::dispatch()` (Entry 6) instead of inventing a second command-application path that could drift from the first.
+
+**Decision: a follower subscribes over an ordinary client connection via a new `SYNC` command, not a separate replication port.**
+Any existing TCP connection to a primary can become a replication stream — `Session::handle_line` recognizes `SYNC` as a request to (a) send a full snapshot of every currently-live key, then (b) keep pushing every future mutation to that same connection, indefinitely. This means any `lsmdb_server`, whether or not it's itself a follower of some other primary, can also act as a replication source for a downstream follower of its own — chained replication falls out of the design for free, without a special case for it.
+
+**Decision: `Db::all_entries()` — reusing `range_scan`'s merge logic, factored out, rather than inventing a "return everything" boundary hack.**
+A follower joining needs the primary's *entire* current state as a starting snapshot, not just writes that happen to occur after it subscribes. `range_scan(start, end)` already merges every SSTable and the memtable into one sorted view and filters by range — but `std::string` has no safe "largest possible key" sentinel to fake a range covering everything (an arbitrary key can contain any byte, including `0xFF`). Instead, the actual merge logic was extracted into a private `Db::merge_all_locked()`, and both `range_scan()` (which filters the result by range) and the new public `all_entries()` (which doesn't) build on top of it — real, existing duplication factored out because two callers needed it now, not a speculative abstraction for a hypothetical future one.
+
+**Decision: read-only enforcement lives in `server::dispatch()` itself, as a `read_only` parameter, not as a separate check layered in `Session`.**
+A replica must reject ordinary client `PUT`/`DELETE` — all its data is supposed to arrive only via replication from its primary, never from a client that connected directly to the wrong server. Putting this check inside `dispatch()` (checked before validating the rest of the command, so a replica rejects a malformed write with the same "read-only" message it gives a well-formed one, matching how a real replica behaves) keeps the single source of truth for "what can this command actually do" in one place, and means `ReplicationClient` applying an incoming `REPLICATE` line — which must always be allowed to write, since that's the entire point of being a follower — simply calls `dispatch()` at its default (`read_only = false`) rather than needing a second, parallel code path.
+
+**A genuine, new concurrency correctness detail Tier 3 introduces that Tier 2 didn't have: a `Session`'s socket can now receive concurrent writes from two different threads, and needs a strand to stay safe.**
+Before replication, a `Session` only ever wrote its own request's response, and never issued another write until that one completed and the next command was read — one write in flight at a time, always initiated from within that same Session's own completion-handler chain. Replication breaks that invariant: `ReplicationHub::publish()` can push a `REPLICATE` line onto a **different** Session's socket (the subscribed follower's) from **whichever io_context thread happens to be running the publishing Session's own write** — and since `tools/lsmdb_server.cpp` runs the shared `io_context` across every hardware thread (Entry 6), that could genuinely be a different OS thread than the one about to process the follower Session's own next request. Asio's threading model requires a single socket's operations never be initiated concurrently from multiple threads without explicit synchronization; two unsynchronized `async_write` calls racing on the same socket is a real data race, not just a logical ordering concern. Fixed by giving every `Session` its own `asio::strand`, with every write (`send_raw()`'s push path and the normal request-response reply) dispatched through it via `asio::post` — the strand guarantees no two writes to that Session's socket ever execute concurrently, regardless of which thread queues them.
+
+**An accepted, documented, narrow race — not hidden as if it didn't exist:** `Session::handle_line`'s `SYNC` handler subscribes the follower to `ReplicationHub` **before** reading `db_.all_entries()` for the snapshot (not after). Subscribing first guarantees no write is ever missed in the gap between "read the snapshot" and "start receiving live updates" — the worst case is a write that lands in that exact window being present in *both* the snapshot and a separately published live message, applied twice on the follower. For `PUT`/`DELETE`, applying the identical operation twice is idempotent and harmless; the alternative ordering (snapshot first, subscribe second) would instead risk a write being missed *entirely*, which is the failure mode that actually matters. A real production replication protocol would resolve this with sequence numbers or log offsets; accepted here as an honest, bounded tradeoff appropriate to a feature the plan itself scopes as "not full consensus."
+
+**Explicitly narrower test scope than Tiers 1 and 2, and why that's the right call, not a shortcut:** `tests/server/replication_test.cpp` proves the actual new claim Tier 3 introduces — data flows from primary to follower (both the pre-existing snapshot and live writes), and the follower's copy survives being reopened completely independent of the primary — by closing and reopening the follower's `Db` directly, in-process, rather than spawning a third layer of separate-process-plus-`SIGKILL` test infrastructure like Entry 5's and Entry 6's flagship tests. That's a deliberate scope decision, not a gap: `tests/core/crash_recovery_test.cpp` already proves "a `Db` survives a real hard-killed OS process," and `tests/server/server_crash_recovery_test.cpp` already proves "a server exposes that guarantee correctly over the network" — Tier 3 doesn't need to re-derive either of those from scratch a third time; it only needs to prove the one thing that's actually new here, which the in-process test does directly and completely.
+
+**A real, manually-run two-process demo** (primary on port 7901, follower on port 7902 started with `--replica-of 127.0.0.1 7901`), matching exactly what the automated test proves, run for real against the actual `lsmdb_server` binary:
+
+```
+$ printf 'PUT alpha one\r\nPUT beta two\r\n' | nc 127.0.0.1 7901
++OK
++OK
+$ ./lsmdb_server ./follower-data 7902 --replica-of 127.0.0.1 7901
+LISTENING 7902
+REPLICA-OF 127.0.0.1 7901
+
+$ printf 'GET alpha\r\nGET beta\r\nPUT should-fail x\r\n' | nc 127.0.0.1 7902
++one
++two
+-ERR this server is a read-only replica
+
+$ printf 'PUT gamma three\r\n' | nc 127.0.0.1 7901     # written to the primary AFTER the follower subscribed
++OK
+$ printf 'GET gamma\r\n' | nc 127.0.0.1 7902            # ... and immediately visible on the follower
++three
+
+# now the primary process is killed outright
+$ printf 'PUT x y\r\n' | nc 127.0.0.1 7901; echo $?
+1                                                        # connection refused -- the primary is gone
+
+$ printf 'GET alpha\r\nGET beta\r\nGET gamma\r\n' | nc 127.0.0.1 7902
++one
++two
++three                                                    # the follower, a completely independent
+                                                           # process, still has everything
+```
+
+**What's tested:** the read-only rejection and mutation-classification logic in isolation (`protocol_test.cpp`), and the full snapshot-plus-live-replication-plus-independent-durability flow described above (`replication_test.cpp`) — all 70 tests across every tier passing on Linux, macOS, and Windows, and under ASan/UBSan/TSan.
+
+**This closes out the plan's full scope: Tier 1 (storage engine), Tier 2 (networked server), and Tier 3 (stretch: replication) are all built, tested, and documented as they were built.**

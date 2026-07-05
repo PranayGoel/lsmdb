@@ -4,8 +4,10 @@
 
 namespace lsmdb::server {
 
-Server::Server(asio::io_context& io_context, unsigned short port, Db& db)
-    : acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)), db_(db) {
+Server::Server(asio::io_context& io_context, unsigned short port, Db& db, bool read_only)
+    : acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)),
+      db_(db),
+      read_only_(read_only) {
   do_accept();
 }
 
@@ -14,7 +16,7 @@ unsigned short Server::local_port() const { return acceptor_.local_endpoint().po
 void Server::do_accept() {
   acceptor_.async_accept([this](const asio::error_code& ec, asio::ip::tcp::socket socket) {
     if (!ec) {
-      std::make_shared<Session>(std::move(socket), db_)->start();
+      std::make_shared<Session>(std::move(socket), db_, replication_hub_, read_only_)->start();
     }
     // Keep accepting regardless of this one connection's outcome -- one
     // failed/dropped accept shouldn't stop the server from serving anyone

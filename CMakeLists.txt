@@ -78,6 +78,8 @@ add_library(lsmdb_server
   src/server/protocol.cpp
   src/server/session.cpp
   src/server/server.cpp
+  src/server/replication_hub.cpp
+  src/server/replication_client.cpp
 )
 target_include_directories(lsmdb_server PUBLIC include)
 target_link_libraries(lsmdb_server PUBLIC lsmdb asio)

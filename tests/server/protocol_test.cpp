@@ -108,3 +108,47 @@ TEST_CASE("an empty value is a valid PUT (trailing space, nothing after)", "[pro
   }
   std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("PUT is rejected, not applied, on a read-only replica", "[protocol]") {
+  auto dir = make_temp_dir();
+  {
+    Db db(dir);
+    auto response = dispatch(db, "PUT k v", /*read_only=*/true);
+    REQUIRE(response.rfind("-ERR", 0) == 0);
+    REQUIRE_FALSE(db.get("k").has_value());  // must not have been applied
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("DELETE is rejected, not applied, on a read-only replica", "[protocol]") {
+  auto dir = make_temp_dir();
+  {
+    Db db(dir);
+    dispatch(db, "PUT k v");  // seeded directly, not read-only, so this is unaffected
+    auto response = dispatch(db, "DELETE k", /*read_only=*/true);
+    REQUIRE(response.rfind("-ERR", 0) == 0);
+    REQUIRE(db.get("k").has_value());  // must not have been deleted
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GET and PING are always allowed, even on a read-only replica", "[protocol]") {
+  auto dir = make_temp_dir();
+  {
+    Db db(dir);
+    dispatch(db, "PUT k v");
+    REQUIRE(dispatch(db, "GET k", /*read_only=*/true) == "+v\r\n");
+    REQUIRE(dispatch(db, "PING", /*read_only=*/true) == "+PONG\r\n");
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("is_mutating_command correctly classifies PUT/DELETE and nothing else", "[protocol]") {
+  using lsmdb::server::is_mutating_command;
+  REQUIRE(is_mutating_command("PUT k v"));
+  REQUIRE(is_mutating_command("DELETE k"));
+  REQUIRE_FALSE(is_mutating_command("GET k"));
+  REQUIRE_FALSE(is_mutating_command("PING"));
+  REQUIRE_FALSE(is_mutating_command("SYNC"));
+  REQUIRE_FALSE(is_mutating_command("BOGUS"));
+}

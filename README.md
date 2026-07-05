@@ -17,7 +17,7 @@ This is being built incrementally, in public, with documentation written as each
 - [x] Compaction — size-tiered merge, correct tombstone/overwrite resolution across overlapping SSTables
 - [x] `Db`: full `Put`/`Get`/`Delete`/`RangeScan` API, automatic flush + compaction, **crash-recovery proven against a real hard-killed OS process** (`SIGKILL`/`TerminateProcess`, not simulated)
 - [x] **Tier 2 — networked server**: an async TCP server (standalone Asio) exposing the engine over a Redis-inspired text protocol, a benchmark client reporting real measured throughput under concurrent load, and the same real-process-hard-kill recovery guarantee proven again through the actual network protocol
-- [ ] **Tier 3 (stretch)** — basic primary-replica log replication
+- [x] **Tier 3 (stretch) — primary-replica replication**: a primary forwards every write to subscribed followers (snapshot on subscribe, then live), each follower applies it through the same durable write path a local client write takes, and a follower's data survives independently once the primary is killed outright
 
 ## Building
 
@@ -81,6 +81,22 @@ A concurrent-load benchmark client ships alongside it:
 ```
 
 Measured on one development machine (see [`DESIGN.md`](DESIGN.md) Entry 6 for the full run): **~25,200 ops/sec** across 160,000 total operations, zero errors under concurrent load.
+
+## Usage (replication, stretch goal)
+
+Any running `lsmdb_server` can act as a primary; a follower subscribes to it at startup:
+
+```bash
+# Terminal 1: the primary
+./build/lsmdb_server ./primary-data 7901
+
+# Terminal 2: a follower, replicating from the primary
+./build/lsmdb_server ./follower-data 7902 --replica-of 127.0.0.1 7901
+```
+
+The follower immediately receives a full snapshot of whatever the primary already had, then every subsequent write in real time, applied through the exact same durable write path a local client write takes — a follower's data is genuinely persisted to its own WAL and SSTables, not just mirrored in memory. It also rejects ordinary client writes (`-ERR this server is a read-only replica`): all of its data is meant to arrive via replication, never from a client connecting to the wrong server. Kill the primary process outright and the follower — a completely independent process, on its own data directory — still serves everything it had. See [`DESIGN.md`](DESIGN.md) Entry 7 for the full design log, including a real two-process run of exactly this.
+
+Deliberately scoped as a stretch goal, matching real primary-replica basics rather than full consensus: manual promotion only, no automatic failover or leader election.
 
 ## Why this project exists
 

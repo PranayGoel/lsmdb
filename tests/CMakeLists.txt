@@ -20,6 +20,7 @@ add_executable(lsmdb_tests
   server/protocol_test.cpp
   server/server_test.cpp
   server/server_crash_recovery_test.cpp
+  server/replication_test.cpp
 )
 target_link_libraries(lsmdb_tests PRIVATE lsmdb lsmdb_server asio Catch2::Catch2WithMain)
 # Paths to the crash-test helper binaries, baked in at compile time so the

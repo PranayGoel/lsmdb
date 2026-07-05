@@ -5,6 +5,7 @@
 #include "lsmdb/wal.h"
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -58,6 +59,15 @@ class Db {
   std::vector<std::pair<std::string, std::string>> range_scan(const std::string& start,
                                                                 const std::string& end) const;
 
+  // Every live (non-deleted) key-value pair in the whole database, sorted --
+  // effectively range_scan over the full key space, without needing a
+  // synthetic "largest possible key" sentinel (std::string has no such
+  // thing; an arbitrary key can contain any byte, including 0xFF). Added for
+  // Tier 3's replication: a follower joining needs a way to receive the
+  // primary's *entire* current state as a starting snapshot, not just
+  // writes that happen to occur after it subscribes.
+  std::vector<std::pair<std::string, std::string>> all_entries() const;
+
   // Exposed for tests/diagnostics -- not part of the normal usage flow.
   size_t sstable_count() const;
 
@@ -80,6 +90,11 @@ class Db {
   void maybe_compact_locked();    // call with mutex_ already held
   std::filesystem::path wal_path() const;
   std::filesystem::path sstable_path(size_t id) const;
+  // Merges every SSTable (oldest to newest) and the memtable into one sorted
+  // map -- the common core both range_scan() and all_entries() build on top
+  // of, one filtered by key range, the other not. Call with mutex_ already
+  // held.
+  std::map<std::string, std::optional<std::string>> merge_all_locked() const;
 };
 
 }  // namespace lsmdb

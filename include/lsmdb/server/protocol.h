@@ -32,6 +32,18 @@ namespace lsmdb::server {
 //
 // A key itself may not contain a space in this protocol -- a documented,
 // accepted scope limit for a demo protocol, not a general-purpose one.
-std::string dispatch(Db& db, const std::string& line);
+//
+// `read_only`, when true, rejects PUT and DELETE with an error instead of
+// applying them -- how a Tier 3 replica server refuses ordinary client
+// writes (all of its data must come from its primary via replication, never
+// from a client that happened to connect to the wrong server). GET and PING
+// are always allowed regardless. Defaults to false so every existing
+// read-write call site is unaffected; a replica's Session passes true.
+std::string dispatch(Db& db, const std::string& line, bool read_only = false);
+
+// True if `line`'s command mutates the database (PUT or DELETE). Used by
+// Session to decide whether a just-applied command should be forwarded to
+// any subscribed replication followers.
+bool is_mutating_command(const std::string& line);
 
 }  // namespace lsmdb::server
