@@ -38,10 +38,16 @@ add_library(lsmdb
   src/bloom_filter.cpp
   src/sstable.cpp
   src/compaction.cpp
-  # Populated incrementally: db.cpp
+  src/db.cpp
 )
 target_include_directories(lsmdb PUBLIC include)
 target_link_libraries(lsmdb PUBLIC lsmdb_platform)
+
+# Test-only helper binary, hard-killed by crash_recovery_test.cpp to prove
+# durability survives a real OS-level process termination, not just a
+# simulated one within the test binary itself. See tools/crash_helper.cpp.
+add_executable(crash_helper tools/crash_helper.cpp)
+target_link_libraries(crash_helper PRIVATE lsmdb)
 
 option(LSMDB_BUILD_TESTS "Build the lsmdb test suite" ON)
 if(LSMDB_BUILD_TESTS)

@@ -15,7 +15,7 @@ This is being built incrementally, in public, with documentation written as each
 - [x] Memtable — sorted, tombstone-aware, thread-safe (TSan-clean under concurrent load)
 - [x] SSTables + bloom filters — immutable on-disk format, full index, FNV-1a Kirsch-Mitzenmacher bloom filter (measured false-positive rate validated at 10K-key scale)
 - [x] Compaction — size-tiered merge, correct tombstone/overwrite resolution across overlapping SSTables
-- [ ] Core `Put`/`Get`/`Delete`/`RangeScan` API + crash-recovery integration test
+- [x] `Db`: full `Put`/`Get`/`Delete`/`RangeScan` API, automatic flush + compaction, **crash-recovery proven against a real hard-killed OS process** (`SIGKILL`/`TerminateProcess`, not simulated)
 - [ ] **Tier 2 — networked server**: TCP server over the engine, a benchmark client with real throughput numbers, a recorded crash-and-recover demo
 - [ ] **Tier 3 (stretch)** — basic primary-replica log replication
 
@@ -28,6 +28,26 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+## Usage (library, pre-Tier-2)
+
+```cpp
+#include "lsmdb/db.h"
+
+lsmdb::Db db("/path/to/data-dir");   // creates the directory if needed, or
+                                      // recovers existing data if it already exists
+
+db.put("hello", "world");
+auto value = db.get("hello");        // std::optional<std::string> -> "world"
+db.remove("hello");
+auto missing = db.get("hello");      // std::nullopt
+
+for (auto& [key, value] : db.range_scan("a", "z")) {
+  // every non-deleted key in [a, z), sorted, across the memtable and every SSTable
+}
+```
+
+Kill the process at any point after a `put()` call returns and reopen a `Db` on the same directory afterward — every acknowledged write is still there. This isn't a claim; it's what `tests/core/crash_recovery_test.cpp` actually does, against a real separately-spawned process, hard-killed with `SIGKILL`/`TerminateProcess`.
 
 ## Why this project exists
 

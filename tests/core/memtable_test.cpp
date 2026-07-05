@@ -79,6 +79,24 @@ TEST_CASE("approximate_size_bytes grows on new keys and doesn't double-count ove
   REQUIRE(m.approximate_size_bytes() == 3);
 }
 
+TEST_CASE("clear() empties the memtable and resets the size counter, and it stays usable after",
+          "[memtable]") {
+  Memtable m;
+  m.put("a", "1");
+  m.put("b", "2");
+  REQUIRE(m.size() == 2);
+  REQUIRE(m.approximate_size_bytes() > 0);
+
+  m.clear();
+  REQUIRE(m.size() == 0);
+  REQUIRE(m.approximate_size_bytes() == 0);
+  REQUIRE(m.get("a").status == LookupStatus::kNotFound);
+
+  m.put("c", "3");  // still usable afterward, not a dead object
+  REQUIRE(m.size() == 1);
+  REQUIRE(m.get("c").value == "3");
+}
+
 TEST_CASE("concurrent puts from multiple threads all land correctly", "[memtable]") {
   // Exercises the shared_mutex under real contention -- run under TSan in CI
   // specifically to catch a data race here, not just to check the final count.

@@ -62,4 +62,10 @@ std::vector<MemtableEntry> Memtable::entries() const {
   return result;
 }
 
+void Memtable::clear() {
+  std::unique_lock lock(mutex_);
+  data_.clear();
+  approximate_bytes_ = 0;
+}
+
 }  // namespace lsmdb

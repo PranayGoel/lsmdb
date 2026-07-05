@@ -62,6 +62,13 @@ class Memtable {
   // correctly shadowed until compaction can safely drop it).
   std::vector<MemtableEntry> entries() const;
 
+  // Empties the memtable and resets the size counter -- called by Db once
+  // this memtable's contents have been durably written out to a new SSTable,
+  // so the same Memtable object can keep accepting new writes afterward
+  // rather than Db needing to construct (and coordinate swapping in) a
+  // brand-new one.
+  void clear();
+
  private:
   mutable std::shared_mutex mutex_;
   std::map<std::string, std::optional<std::string>> data_;
