@@ -12,7 +12,7 @@ This is being built incrementally, in public, with documentation written as each
 
 - [x] Cross-platform build/CI skeleton + platform-abstraction layer (`sync_file`)
 - [x] Write-Ahead Log — durable, CRC32-checked, crash/corruption recovery tested
-- [ ] Memtable
+- [x] Memtable — sorted, tombstone-aware, thread-safe (TSan-clean under concurrent load)
 - [ ] SSTables + bloom filters
 - [ ] Compaction
 - [ ] Core `Put`/`Get`/`Delete`/`RangeScan` API + crash-recovery integration test

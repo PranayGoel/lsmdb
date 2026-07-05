@@ -50,3 +50,20 @@ This is the actual durability/throughput tradeoff of the whole design: fsync-per
 **What's tested:** round-trip of Put/Delete records including empty values, reopening an existing WAL file across a simulated restart, `reset()` correctly discarding prior content, and — the two tests that matter most — the torn-write and CRC-mismatch recovery scenarios described above. All 12 tests (platform + crc32 + WAL) pass under Debug, ASan, UBSan, and TSan.
 
 **Next:** the memtable — the in-memory structure `append()`ed records get applied to before ever touching an SSTable.
+
+---
+
+## Entry 2 — Memtable
+
+**Decision: `std::map` (a red-black tree), not a skip list.**
+Skip lists are the more commonly cited textbook LSM-tree memtable structure, mainly because they're easier to make *lock-free* for very high write concurrency. This project uses a single `std::shared_mutex` instead — simpler, already-correct (it's the standard library), and entirely sufficient for the concurrency level this project targets (Tier 2's networked server handles concurrent client connections, not the kind of extreme write-throughput regime where lock-free data structures start to matter). Named explicitly as a scope tradeoff: if lock-free concurrent writes become a real requirement, a skip list is the natural next step, not a rewrite from scratch.
+
+**Decision: tombstones (`std::optional<std::string>` = `nullopt`) instead of erasing deleted keys outright.**
+This is the single most important correctness property of the memtable, and it's easy to get wrong: if `remove(key)` just erased the map entry, a `get(key)` afterward would report `kNotFound` — indistinguishable from "this key was never written at all." That distinction matters enormously once SSTables exist (next entry): `kNotFound` in the memtable has to mean "check older SSTables," while `kDeleted` has to mean "stop looking, this key is gone" — even if an older SSTable on disk still has a stale value for it. Losing that distinction would resurrect deleted data. `remove()` on a key the memtable has never seen still creates a tombstone (tested explicitly: `"removing a key that was never written still creates a tombstone"`), for exactly this reason.
+
+**Decision: `approximate_size_bytes()` tracks a running total incrementally, corrected on overwrite, rather than summing on demand.**
+Summing all entries on every call would make every `put`/`get` pay an O(n) cost just to check the flush threshold — the incremental counter keeps that check O(1). The correction-on-overwrite logic (subtract the old key+value size before adding the new one) is what `"doesn't double-count overwrites"` tests — a naive `bytes += key.size() + value.size()` on every put would make the counter drift upward forever on a workload that repeatedly overwrites the same keys, eventually triggering flushes far more often than the data volume actually warrants.
+
+**What's tested:** basic put/get/overwrite, the tombstone-vs-never-written distinction (both directions), sorted iteration order via `entries()`, the size-accounting correction on overwrite, and — run explicitly under ThreadSanitizer in CI, not just Debug — 8 threads concurrently inserting 200 keys each with no data race and the correct final count. All 20 tests (platform + crc32 + WAL + memtable) pass under Debug, ASan, UBSan, and TSan.
+
+**Next:** SSTables — where a full memtable gets flushed to disk, plus the per-SSTable bloom filter that keeps lookups for nonexistent keys cheap as more SSTables accumulate.
