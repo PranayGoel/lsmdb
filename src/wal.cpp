@@ -130,7 +130,7 @@ std::vector<WalRecord> WriteAheadLog::replay(const std::filesystem::path& path) 
 void WriteAheadLog::reset() {
   std::lock_guard<std::mutex> lock(mutex_);
   out_.close();
-  std::filesystem::remove(path_);
+  platform::remove_file(path_);
   open_for_append();
 }
 

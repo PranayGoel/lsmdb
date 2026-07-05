@@ -1,7 +1,10 @@
 #include "lsmdb/platform/file_sync.h"
 
+#include <chrono>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <thread>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -32,6 +35,22 @@ void sync_file(const std::filesystem::path& path) {
   }
 }
 
+bool remove_file(const std::filesystem::path& path) {
+  // Ten attempts, 50ms apart: generous enough to ride out a transient
+  // Defender scan (typically resolves within one or two retries in
+  // practice) without turning a real failure into a multi-second hang.
+  constexpr int kMaxAttempts = 10;
+  constexpr auto kRetryDelay = std::chrono::milliseconds(50);
+
+  std::error_code ec;
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    bool removed = std::filesystem::remove(path, ec);
+    if (!ec) return removed;
+    std::this_thread::sleep_for(kRetryDelay);
+  }
+  throw std::runtime_error("remove_file: failed to remove " + path.string() + ": " + ec.message());
+}
+
 #else
 
 void sync_file(const std::filesystem::path& path) {
@@ -44,6 +63,12 @@ void sync_file(const std::filesystem::path& path) {
   if (result != 0) {
     throw std::runtime_error("sync_file: fsync failed for " + path.string());
   }
+}
+
+bool remove_file(const std::filesystem::path& path) {
+  // POSIX unlink(2) has no "file in use" failure mode -- a file can be
+  // removed while other handles remain open on it -- so no retry is needed.
+  return std::filesystem::remove(path);
 }
 
 #endif

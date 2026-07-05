@@ -22,7 +22,7 @@ TEST_CASE("sync_file succeeds on a real, existing file", "[platform]") {
     out << "durability matters";
   }
   REQUIRE_NOTHROW(lsmdb::platform::sync_file(path));
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
 
 TEST_CASE("sync_file throws on a nonexistent file rather than silently succeeding",

@@ -134,15 +134,21 @@ TEST_CASE(
 
   spawn_write_and_kill(CRASH_HELPER_PATH, dir.string(), kNumKeys);
 
-  // A brand-new Db, in THIS process, opened on the directory the killed
-  // process was writing to -- this is the actual recovery path being
-  // proven, identical to what would happen restarting a real database
-  // server after its process was killed.
-  Db recovered(dir);
-  for (int i = 0; i < kNumKeys; ++i) {
-    auto result = recovered.get("crash-key-" + std::to_string(i));
-    REQUIRE(result.has_value());
-    REQUIRE(*result == "crash-value-" + std::to_string(i));
+  {
+    // Scoped so `recovered`'s open WAL/SSTable handles close before
+    // remove_all runs below -- Windows can't delete a file with an open
+    // handle on it, unlike POSIX.
+    //
+    // A brand-new Db, in THIS process, opened on the directory the killed
+    // process was writing to -- this is the actual recovery path being
+    // proven, identical to what would happen restarting a real database
+    // server after its process was killed.
+    Db recovered(dir);
+    for (int i = 0; i < kNumKeys; ++i) {
+      auto result = recovered.get("crash-key-" + std::to_string(i));
+      REQUIRE(result.has_value());
+      REQUIRE(*result == "crash-value-" + std::to_string(i));
+    }
   }
 
   std::filesystem::remove_all(dir);

@@ -1,6 +1,7 @@
 #include "lsmdb/db.h"
 
 #include "lsmdb/compaction.h"
+#include "lsmdb/platform/file_sync.h"
 
 #include <algorithm>
 #include <map>
@@ -201,7 +202,7 @@ void Db::maybe_compact_locked() {
   // exactly the kind of platform difference this project's cross-platform
   // requirement exists to catch before it ships, not after.
   sstables_.clear();
-  for (const auto& path : old_paths) std::filesystem::remove(path);
+  for (const auto& path : old_paths) platform::remove_file(path);
 
   sstables_.push_back(merged);
 }

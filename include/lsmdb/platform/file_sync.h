@@ -25,4 +25,19 @@ namespace lsmdb::platform {
 // record), not on every buffered write.
 void sync_file(const std::filesystem::path& path);
 
+// Removes a file, tolerating the transient "file is in use by another
+// process" failure Windows can report immediately after the last handle to
+// that file is closed. This is a well-documented flakiness pattern on
+// GitHub's windows-latest runners -- most often Windows Defender's real-time
+// scanner briefly opening a just-written file for inspection -- and every
+// close-then-delete or close-then-reopen sequence in this codebase (WAL
+// reset, compaction dropping old SSTables) hits it. POSIX's unlink(2) has no
+// equivalent failure mode (a file can be removed while other handles are
+// still open on it), so this collapses to a single std::filesystem::remove
+// there; Windows retries briefly before giving up.
+//
+// Mirrors std::filesystem::remove's return contract: true if a file was
+// removed, false if it didn't exist.
+bool remove_file(const std::filesystem::path& path);
+
 }  // namespace lsmdb::platform

@@ -1,5 +1,7 @@
 #include "lsmdb/wal.h"
 
+#include "lsmdb/platform/file_sync.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <random>
@@ -41,7 +43,7 @@ TEST_CASE("append then replay round-trips Put and Delete records in order", "[wa
   REQUIRE(records[2].type == RecordType::kDelete);
   REQUIRE(records[2].key == "k1");
 
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
 
 TEST_CASE("append survives and replays an empty value", "[wal]") {
@@ -53,7 +55,7 @@ TEST_CASE("append survives and replays an empty value", "[wal]") {
   auto records = WriteAheadLog::replay(path);
   REQUIRE(records.size() == 1);
   REQUIRE(records[0].value.empty());
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
 
 TEST_CASE("a WAL reopened on the same path appends after existing records", "[wal]") {
@@ -70,25 +72,30 @@ TEST_CASE("a WAL reopened on the same path appends after existing records", "[wa
   REQUIRE(records.size() == 2);
   REQUIRE(records[0].key == "a");
   REQUIRE(records[1].key == "b");
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
 
 TEST_CASE("reset() discards prior records so replay comes back empty", "[wal]") {
   auto path = make_temp_path();
-  WriteAheadLog wal(path);
-  wal.append(WalRecord{RecordType::kPut, "k", "v"});
-  REQUIRE(WriteAheadLog::replay(path).size() == 1);
+  {
+    // Scoped so `wal`'s open file handle (held for its whole lifetime, even
+    // across reset()) closes before remove_file runs below -- Windows can't
+    // delete a file with an open handle on it, unlike POSIX.
+    WriteAheadLog wal(path);
+    wal.append(WalRecord{RecordType::kPut, "k", "v"});
+    REQUIRE(WriteAheadLog::replay(path).size() == 1);
 
-  wal.reset();
-  REQUIRE(WriteAheadLog::replay(path).empty());
+    wal.reset();
+    REQUIRE(WriteAheadLog::replay(path).empty());
 
-  // and the log is still usable after reset
-  wal.append(WalRecord{RecordType::kPut, "k2", "v2"});
-  auto records = WriteAheadLog::replay(path);
-  REQUIRE(records.size() == 1);
-  REQUIRE(records[0].key == "k2");
+    // and the log is still usable after reset
+    wal.append(WalRecord{RecordType::kPut, "k2", "v2"});
+    auto records = WriteAheadLog::replay(path);
+    REQUIRE(records.size() == 1);
+    REQUIRE(records[0].key == "k2");
+  }
 
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
 
 TEST_CASE(
@@ -118,7 +125,7 @@ TEST_CASE(
   REQUIRE(records[0].key == "safe1");
   REQUIRE(records[1].key == "safe2");
 
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
 
 TEST_CASE("replay rejects a record whose bytes were corrupted after writing (CRC mismatch)",
@@ -141,5 +148,5 @@ TEST_CASE("replay rejects a record whose bytes were corrupted after writing (CRC
   auto records = WriteAheadLog::replay(path);
   REQUIRE(records.empty());  // CRC mismatch -- the corrupted record is discarded, not trusted
 
-  std::filesystem::remove(path);
+  lsmdb::platform::remove_file(path);
 }
