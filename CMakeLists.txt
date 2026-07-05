@@ -35,7 +35,9 @@ add_library(lsmdb
   src/crc32.cpp
   src/wal.cpp
   src/memtable.cpp
-  # Populated incrementally: sstable.cpp, bloom_filter.cpp, compaction.cpp, db.cpp
+  src/bloom_filter.cpp
+  src/sstable.cpp
+  # Populated incrementally: compaction.cpp, db.cpp
 )
 target_include_directories(lsmdb PUBLIC include)
 target_link_libraries(lsmdb PUBLIC lsmdb_platform)

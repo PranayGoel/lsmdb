@@ -67,3 +67,25 @@ Summing all entries on every call would make every `put`/`get` pay an O(n) cost 
 **What's tested:** basic put/get/overwrite, the tombstone-vs-never-written distinction (both directions), sorted iteration order via `entries()`, the size-accounting correction on overwrite, and — run explicitly under ThreadSanitizer in CI, not just Debug — 8 threads concurrently inserting 200 keys each with no data race and the correct final count. All 20 tests (platform + crc32 + WAL + memtable) pass under Debug, ASan, UBSan, and TSan.
 
 **Next:** SSTables — where a full memtable gets flushed to disk, plus the per-SSTable bloom filter that keeps lookups for nonexistent keys cheap as more SSTables accumulate.
+
+---
+
+## Entry 3 — Bloom filter + SSTable
+
+**Decision: FNV-1a for the bloom filter's hashing, not `std::hash`.**
+`std::hash`'s actual algorithm is unspecified by the C++ standard and can differ across standard library implementations, or even between builds of the same implementation. A bloom filter serialized to an SSTable file by one binary has to hash keys identically when a *different* binary (a later version of this program, or in principle a different compiler/stdlib) loads that file back — `std::hash` doesn't guarantee that; FNV-1a, implemented directly, does.
+
+**Decision: two hash values (Kirsch-Mitzenmacher), not k independent hash functions.**
+Computing k genuinely independent hash functions per key is unnecessary — Kirsch & Mitzenmacher (2006) showed that deriving `g_i(x) = h1(x) + i*h2(x)` from just two real hashes gives asymptotically the same false-positive behavior as k independent ones. `bloom_filter_test.cpp`'s false-positive-rate test (10,000 insertions, 10,000 disjoint probes, checked against a generous margin above the 1% target) is what actually validates this holds in practice, not just in theory.
+
+**Decision: a full per-SSTable index (every key, in memory), not a sparse block-index like RocksDB/LevelDB use.**
+Real systems keep a sparse index (one entry per data *block*, not per key) specifically to bound memory use when a single SSTable holds many millions of keys — looking up a key means finding its block via the sparse index, then linearly scanning within that block. This project's full index is simpler and strictly correct, and entirely adequate at the scale a portfolio/demo project actually reaches; documented explicitly as the tradeoff it is, not a limitation being quietly hoped nobody notices. The natural next step if this needed to scale further.
+
+**Decision: `get()`'s bloom-filter check is purely a performance optimization, never load-bearing for correctness.**
+This is worth being precise about: `maybe_contains()` returning true doesn't mean the key is actually present — it means "check the index to find out." The index lookup (`std::lower_bound` against the sorted, in-memory index) is what actually determines the answer; a bloom false positive just costs one wasted index check, never a wrong answer. `"a large SSTable's bloom filter correctly skips most absent-key lookups"` tests exactly this: correctness holds for all 1000 present keys and all 10 absent probe keys regardless of whether any of the absent ones happened to trigger a bloom false positive.
+
+**A real bug this round's own test caught, worth stating precisely (this is a bug in a test, not in the SSTable code — but it demonstrates something real about lexicographic vs. numeric ordering that's easy to get wrong anywhere sorted-string data shows up):** the first version of the 1000-key SSTable test generated keys as `"key-" + std::to_string(i)` for `i` in `[0, 1000)` and assumed that was already in sorted order. It wasn't — `"key-10"` sorts *before* `"key-2"` lexicographically, since string comparison compares character-by-character, not by parsed numeric value. `SSTable::create`'s own sorted-input check (added specifically so a caller bug like this fails loudly instead of silently corrupting the on-disk index) caught this immediately, throwing `"entries must be strictly sorted by key"` the first time the test ran. Fixed by zero-padding the generated keys (`"key-0000"`, `"key-0001"`, ...) so lexicographic order matches numeric order. Good example of a validating precondition check earning its keep on the very first real use.
+
+**What's tested:** the bloom filter's no-false-negatives guarantee, empty-filter behavior, measured false-positive rate at 10K-key scale, byte-serialization round-tripping, and rejecting a truncated buffer; the SSTable's create-time sorted-input validation, correct get()/read_all() behavior across present keys/absent keys/tombstones, and file-format validation (bad magic number, too-small file) failing loudly rather than reading garbage. All 33 tests pass under Debug, ASan, UBSan, and TSan.
+
+**Next:** compaction — merging multiple SSTables into fewer, larger ones, and the leveled-vs-size-tiered decision that comes with it.

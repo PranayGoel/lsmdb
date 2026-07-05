@@ -13,7 +13,7 @@ This is being built incrementally, in public, with documentation written as each
 - [x] Cross-platform build/CI skeleton + platform-abstraction layer (`sync_file`)
 - [x] Write-Ahead Log — durable, CRC32-checked, crash/corruption recovery tested
 - [x] Memtable — sorted, tombstone-aware, thread-safe (TSan-clean under concurrent load)
-- [ ] SSTables + bloom filters
+- [x] SSTables + bloom filters — immutable on-disk format, full index, FNV-1a Kirsch-Mitzenmacher bloom filter (measured false-positive rate validated at 10K-key scale)
 - [ ] Compaction
 - [ ] Core `Put`/`Get`/`Delete`/`RangeScan` API + crash-recovery integration test
 - [ ] **Tier 2 — networked server**: TCP server over the engine, a benchmark client with real throughput numbers, a recorded crash-and-recover demo
