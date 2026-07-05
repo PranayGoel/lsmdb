@@ -174,3 +174,54 @@ This "worked" on macOS and Linux purely because POSIX's `unlink()` doesn't care 
 2. **A genuinely transient case, handled separately.** Even with objects correctly scoped, the OS's own delayed handle-release timing, or (a well-documented GitHub Actions `windows-latest` flakiness pattern) Windows Defender's real-time scanner briefly opening a just-written file for inspection, can still cause a delete to fail immediately after a file was legitimately and fully closed. This is transient by nature, so it calls for a different remedy than scoping: a new `platform::remove_file()` was added alongside `sync_file()` — the same abstraction point (Entry 0's rule: all OS-specific behavior lives in `platform/file_sync.h`) — that retries `std::filesystem::remove()` up to 10 times, 50ms apart, before giving up and rethrowing. POSIX's implementation is a pass-through (unlink has no such failure mode to retry against); every engine call site that removes a just-closed file (`WriteAheadLog::reset()`, `Db::maybe_compact_locked()`'s old-SSTable cleanup) and every test's own per-file cleanup now goes through it instead of calling `std::filesystem::remove()` directly.
 
 **Why both fixes were needed, not just one:** the retry alone would not have fixed the `wal_test.cpp` failure, because that failure wasn't transient — `wal`'s handle was never going to close within any retry window, since the object itself wasn't destructed yet. Conversely, scoping alone doesn't address the possibility of a genuinely transient lock on a file that *has* actually been closed, which is a real, separate failure mode worth being defensive against on Windows CI runners regardless. Diagnosing which of the two was actually responsible for this specific failure required reading the full, untruncated exception message from the raw CI log rather than trusting Catch2's summary line — the summary alone ("unexpected exception") gives no signal on which of these two very different root causes is in play.
+
+With this fix, all 52 tests pass on `ubuntu-latest`, `macos-latest`, `windows-latest`, and all three sanitizer legs — Tier 1 is genuinely, verifiably cross-platform, not just claimed to be.
+
+---
+
+## Entry 6 — Tier 2: the networked server, over standalone Asio
+
+**Decision: standalone (Boost-free) Asio, not hand-rolled sockets, for the networking layer.**
+The cross-platform requirement extends to networking exactly the way it already applies to durability (Entry 0): POSIX exposes BSD sockets, Windows exposes Winsock, and they're similar but not identical (different headers, different init/teardown calls, different error-code conventions). Asio is a mature, portable abstraction over that difference — the same relationship `platform::sync_file` has to `fsync`/`FlushFileBuffers`, just upstream and pre-built rather than hand-derived, because there's no engineering value in re-solving socket-API portability from scratch when a widely-used library already does it correctly. "Standalone" Asio (fetched directly from its own GitHub repo, not via Boost) avoids pulling in all of Boost for one header-only library — `ASIO_STANDALONE` is the compile definition that tells Asio's headers to skip every Boost dependency.
+
+**Decision: a genuine text protocol, Redis-inspired but not RESP-compatible — `PUT key value`, `GET key`, `DELETE key`, `PING`.**
+The goal was a protocol simple enough to drive by hand from `nc`, `telnet`, or PowerShell's `Test-NetConnection` with zero custom tooling — a real, demoable, cross-platform-testable interface, not something that only this project's own client can speak. `GET` on a missing key replies with Redis's classic `$-1` nil sentinel specifically because it's instantly recognizable to anyone who's used `redis-cli`, a small but real signal of familiarity with how production key-value stores actually communicate "not found." Full RESP-protocol compliance was deliberately out of scope — it buys binary-safety and multi-bulk replies this project's demo doesn't need, at the cost of a meaningfully more complex parser, for no benefit here.
+
+**Decision: protocol parsing/dispatch (`server::dispatch`) is a pure function, entirely independent of any socket type.**
+`dispatch(Db&, const std::string& line) -> std::string` takes one already-received line and a `Db&`, and returns the exact response bytes. This is what makes `tests/server/protocol_test.cpp` possible without ever opening a real socket — every command's semantics (PUT/GET/DELETE/PING, malformed-input handling, values-with-spaces) gets a fast, isolated unit test. The real-socket path (`Session`, `Server`) is tested separately, over actual TCP, in `tests/server/server_test.cpp` — deliberately layered the same way Tier 1's WAL-only vs. real-process-kill crash tests are (Entry 5): a cheap, precise unit test for the logic, plus a slower, end-to-end test proving the wiring around it actually works.
+
+**Decision: async I/O via `enable_shared_from_this`, not one thread per connection.**
+Each `Session` keeps itself alive across its own chain of `async_read_until`/`async_write` calls by capturing `shared_from_this()` in every completion handler — the standard Asio idiom for object lifetime under callback-based async I/O. A `Session` is destroyed (closing its socket via RAII) the moment neither its read nor write chain has a pending operation left, which happens naturally on client disconnect or any socket error, with no explicit cleanup code required anywhere. `Db`'s own internal mutex (Entry 5) is what makes running the shared `io_context` across every hardware thread (`tools/lsmdb_server.cpp`) safe for genuinely concurrent client connections — the server layer adds no locking of its own, and doesn't need to.
+
+**Decision: `Server`'s port parameter accepts `0` to mean "let the OS choose."**
+`asio::ip::tcp::acceptor` treats port 0 as "bind an ephemeral port," and `Server::local_port()` (reading `acceptor_.local_endpoint().port()` after construction) exposes whatever the OS actually picked. Every test that spins up a real `Server` uses this instead of a hardcoded port number, which is what makes the test suite safe to run concurrently (e.g. multiple CI jobs, or a developer running tests while another instance is already listening on some fixed "obvious" port) without ever colliding.
+
+**The flagship artifact: `tests/server/server_crash_recovery_test.cpp` — the Tier 2 version of Entry 5's real hard-kill crash test.**
+Spawns the actual `lsmdb_server` binary this project ships (not a test double) as a real, separate OS process, listening on an OS-assigned port it announces via a machine-parseable `LISTENING <port>` first line of stdout. A real TCP client connects and issues ten `PUT`s, each acknowledged with `+OK`. The server process is then hard-killed (`SIGKILL`/`TerminateProcess` — the same technique as Entry 5's engine-level test, in this file rather than folded into the shared platform abstraction, for the same "test infrastructure vs. engine code" reason documented there) with zero chance to flush anything beyond what each `put()` already did synchronously through the WAL. A fresh `lsmdb_server` process is then spawned on the same data directory (a new OS-assigned port, since immediately reusing the just-killed one isn't guaranteed available on every platform), and a new client confirms every one of the ten keys is still there. This is the actual end-to-end claim of the whole project, proven across both a real process boundary *and* the real network protocol — not simulated, not assumed, not just "the engine underneath is durable, trust that the server exposes it correctly too."
+
+**A real, measured throughput number, not a claimed one:** `tools/lsmdb_bench.cpp` drove 16 concurrent client connections, 5,000 PUT+GET pairs each (160,000 total operations, each worker writing and reading back its own disjoint key range so the number reflects genuine concurrent throughput rather than lock contention on a shared hot key), against a locally running `lsmdb_server` on this development machine:
+
+```
+clients: 16, ops/client: 5000 (PUT+GET each)
+total operations: 160000
+elapsed: 6.3382s
+throughput: 25243.8 ops/sec
+put errors: 0, get errors: 0
+```
+
+Zero errors under concurrent load is as important a result here as the throughput figure itself — a benchmark that only measures speed and never checks correctness isn't a very convincing artifact. (This number is specific to one unremarkable development laptop and one specific configuration; it's reported as a demonstrated, reproducible measurement — `lsmdb_bench <host> <port> <clients> <ops>` against any running server — not a performance claim meant to generalize.)
+
+Manually exercised with real `nc`, confirming the protocol is exactly as usable by hand as intended:
+```
+$ printf 'PING\r\nPUT demo-key demo value with spaces\r\nGET demo-key\r\nGET missing-key\r\nDELETE demo-key\r\nGET demo-key\r\n' | nc 127.0.0.1 7891
++PONG
++OK
++demo value with spaces
+$-1
++OK
+$-1
+```
+
+**What's tested:** protocol-logic correctness in isolation (`protocol_test.cpp`: all four commands, malformed input, values containing spaces, empty values), the real-socket server wiring (`server_test.cpp`: round-trip over an actual TCP connection, two independent connections sharing one consistent database view, many sequential commands on one connection), and the flagship real-process-kill-and-restart recovery test described above — all passing on Linux, macOS, and Windows, and under ASan/UBSan/TSan.
+
+**Next:** Tier 3 (stretch, only if time remains) — basic primary-replica log replication: one primary streams its WAL to a follower, which replays it; killing the primary and confirming the follower already has the data, with manual promotion (no automatic failover/leader-election required for this to be a genuine, honest talking point).

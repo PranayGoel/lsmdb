@@ -17,15 +17,19 @@ add_executable(lsmdb_tests
   core/compaction_test.cpp
   core/db_test.cpp
   core/crash_recovery_test.cpp
+  server/protocol_test.cpp
+  server/server_test.cpp
+  server/server_crash_recovery_test.cpp
 )
-target_link_libraries(lsmdb_tests PRIVATE lsmdb Catch2::Catch2WithMain)
-# Path to the crash-test helper binary, baked in at compile time so
-# crash_recovery_test.cpp can spawn it without guessing a relative path that
+target_link_libraries(lsmdb_tests PRIVATE lsmdb lsmdb_server asio Catch2::Catch2WithMain)
+# Paths to the crash-test helper binaries, baked in at compile time so the
+# crash-recovery tests can spawn them without guessing a relative path that
 # would differ between single-config (Make/Ninja) and multi-config
 # (Visual Studio, which nests exe output under a Debug/Release subfolder)
 # generators.
 target_compile_definitions(lsmdb_tests PRIVATE
-  CRASH_HELPER_PATH="$<TARGET_FILE:crash_helper>")
+  CRASH_HELPER_PATH="$<TARGET_FILE:crash_helper>"
+  LSMDB_SERVER_PATH="$<TARGET_FILE:lsmdb_server_bin>")
 
 include(CTest)
 include(Catch)

@@ -16,7 +16,7 @@ This is being built incrementally, in public, with documentation written as each
 - [x] SSTables + bloom filters — immutable on-disk format, full index, FNV-1a Kirsch-Mitzenmacher bloom filter (measured false-positive rate validated at 10K-key scale)
 - [x] Compaction — size-tiered merge, correct tombstone/overwrite resolution across overlapping SSTables
 - [x] `Db`: full `Put`/`Get`/`Delete`/`RangeScan` API, automatic flush + compaction, **crash-recovery proven against a real hard-killed OS process** (`SIGKILL`/`TerminateProcess`, not simulated)
-- [ ] **Tier 2 — networked server**: TCP server over the engine, a benchmark client with real throughput numbers, a recorded crash-and-recover demo
+- [x] **Tier 2 — networked server**: an async TCP server (standalone Asio) exposing the engine over a Redis-inspired text protocol, a benchmark client reporting real measured throughput under concurrent load, and the same real-process-hard-kill recovery guarantee proven again through the actual network protocol
 - [ ] **Tier 3 (stretch)** — basic primary-replica log replication
 
 ## Building
@@ -48,6 +48,39 @@ for (auto& [key, value] : db.range_scan("a", "z")) {
 ```
 
 Kill the process at any point after a `put()` call returns and reopen a `Db` on the same directory afterward — every acknowledged write is still there. This isn't a claim; it's what `tests/core/crash_recovery_test.cpp` actually does, against a real separately-spawned process, hard-killed with `SIGKILL`/`TerminateProcess`.
+
+## Usage (networked server)
+
+```bash
+# Terminal 1: start the server
+./build/lsmdb_server ./data 6380
+
+# Terminal 2: talk to it with anything that speaks TCP text -- no custom
+# client required
+$ nc 127.0.0.1 6380
+PING
++PONG
+PUT hello world
++OK
+GET hello
++world
+GET missing
+$-1
+DELETE hello
++OK
+```
+
+Protocol: `PUT key value` / `GET key` / `DELETE key` / `PING`, each terminated by `\r\n` — Redis-inspired (including its `$-1` nil-reply convention for a missing key on `GET`) but not RESP-compatible; simple enough to drive by hand from `nc`, `telnet`, or PowerShell's `Test-NetConnection`.
+
+Kill the server process at any point after a client's `PUT` gets its `+OK`, restart it on the same data directory, reconnect, and every acknowledged write is still there — proven for real in `tests/server/server_crash_recovery_test.cpp`, the same hard-kill guarantee as the library-level test above, exercised this time through the actual network protocol against the actual server binary this project ships.
+
+A concurrent-load benchmark client ships alongside it:
+
+```bash
+./build/lsmdb_bench 127.0.0.1 6380 16 5000   # 16 concurrent clients, 5000 PUT+GET pairs each
+```
+
+Measured on one development machine (see [`DESIGN.md`](DESIGN.md) Entry 6 for the full run): **~25,200 ops/sec** across 160,000 total operations, zero errors under concurrent load.
 
 ## Why this project exists
 
