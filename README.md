@@ -2,26 +2,26 @@
 
 [![CI](https://github.com/PranayGoel/lsmdb/actions/workflows/ci.yml/badge.svg)](https://github.com/PranayGoel/lsmdb/actions/workflows/ci.yml)
 
-A from-scratch LSM-tree key-value storage engine and networked database service, in C++. Built to actually understand — not just use — the storage engine design pattern underneath RocksDB, LevelDB, and Cassandra's storage layer: a write-ahead log for durability, an in-memory sorted buffer, immutable sorted files on disk, background compaction, and bloom filters to keep reads fast as data grows.
+A key-value storage engine written from scratch in C++, using the same LSM-tree design that RocksDB, LevelDB, and Cassandra are built on. I wanted to actually understand how these things work under the hood instead of just importing one and calling it a day, so this has a write-ahead log, an in-memory sorted buffer, immutable sorted files on disk, background compaction, and bloom filters — the whole pipeline.
 
-Cross-platform by design (CMake + `std::filesystem` + `std::thread` + standalone Asio) — builds and passes its full test suite on Linux, macOS, and Windows via CI, not just the machine it was written on.
+It's cross-platform (Linux, macOS, Windows), and CI actually builds and runs the full test suite on all three, not just the machine I wrote it on.
 
 ## Status
 
-This is being built incrementally, in public, with documentation written as each piece lands — not reconstructed afterward. See [`DESIGN.md`](DESIGN.md) for the running design log (what's built, why each decision was made, what's next).
+I built this in public and wrote the design notes as I went instead of writing them up after the fact — see [`DESIGN.md`](DESIGN.md) for the full log of what got built, why, and what tripped me up along the way.
 
-- [x] Cross-platform build/CI skeleton + platform-abstraction layer (`sync_file`)
-- [x] Write-Ahead Log — durable, CRC32-checked, crash/corruption recovery tested
-- [x] Memtable — sorted, tombstone-aware, thread-safe (TSan-clean under concurrent load)
-- [x] SSTables + bloom filters — immutable on-disk format, full index, FNV-1a Kirsch-Mitzenmacher bloom filter (measured false-positive rate validated at 10K-key scale)
-- [x] Compaction — size-tiered merge, correct tombstone/overwrite resolution across overlapping SSTables
-- [x] `Db`: full `Put`/`Get`/`Delete`/`RangeScan` API, automatic flush + compaction, **crash-recovery proven against a real hard-killed OS process** (`SIGKILL`/`TerminateProcess`, not simulated)
-- [x] **Tier 2 — networked server**: an async TCP server (standalone Asio) exposing the engine over a Redis-inspired text protocol, a benchmark client reporting real measured throughput under concurrent load, and the same real-process-hard-kill recovery guarantee proven again through the actual network protocol
-- [x] **Tier 3 (stretch) — primary-replica replication**: a primary forwards every write to subscribed followers (snapshot on subscribe, then live), each follower applies it through the same durable write path a local client write takes, and a follower's data survives independently once the primary is killed outright
+- [x] Cross-platform build setup + CI, with a platform abstraction layer for the one bit of OS-specific code (`fsync`/`FlushFileBuffers`)
+- [x] Write-ahead log — CRC32-checked, tested against crashes and corrupted writes
+- [x] Memtable — sorted, tombstone-aware, thread-safe (ran it under TSan to be sure)
+- [x] SSTables + bloom filters — immutable on-disk format with a full index and an FNV-1a bloom filter
+- [x] Compaction — size-tiered, merges overlapping SSTables and resolves tombstones/overwrites correctly
+- [x] `Db`: the actual Put/Get/Delete/RangeScan API, with automatic flush + compaction. Crash recovery is tested by literally `SIGKILL`-ing a separate process mid-write and reopening the data directory afterward
+- [x] Tier 2 — a networked server on top of the engine (async TCP, standalone Asio), plus a benchmark client and the same crash-recovery test but this time through the wire protocol
+- [x] Tier 3 (stretch goal) — basic primary/replica replication
 
 ## Building
 
-Requires CMake 3.20+ and a C++20 compiler (gcc, clang, or MSVC).
+You need CMake 3.20+ and a C++20 compiler (gcc, clang, or MSVC all work).
 
 ```bash
 cmake -S . -B build
@@ -29,13 +29,13 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Usage (library, pre-Tier-2)
+## Using it as a library
 
 ```cpp
 #include "lsmdb/db.h"
 
-lsmdb::Db db("/path/to/data-dir");   // creates the directory if needed, or
-                                      // recovers existing data if it already exists
+lsmdb::Db db("/path/to/data-dir");   // creates the directory if it doesn't exist,
+                                      // or picks up existing data if it does
 
 db.put("hello", "world");
 auto value = db.get("hello");        // std::optional<std::string> -> "world"
@@ -43,20 +43,19 @@ db.remove("hello");
 auto missing = db.get("hello");      // std::nullopt
 
 for (auto& [key, value] : db.range_scan("a", "z")) {
-  // every non-deleted key in [a, z), sorted, across the memtable and every SSTable
+  // every live key in [a, z), sorted, across the memtable and every SSTable
 }
 ```
 
-Kill the process at any point after a `put()` call returns and reopen a `Db` on the same directory afterward — every acknowledged write is still there. This isn't a claim; it's what `tests/core/crash_recovery_test.cpp` actually does, against a real separately-spawned process, hard-killed with `SIGKILL`/`TerminateProcess`.
+You can kill the process right after a `put()` returns, reopen a `Db` on the same directory, and the write will still be there. `tests/core/crash_recovery_test.cpp` proves this for real — it spawns a separate process, hard-kills it, then opens a fresh `Db` on the same data and checks everything survived.
 
-## Usage (networked server)
+## Running it as a server
 
 ```bash
-# Terminal 1: start the server
+# start it
 ./build/lsmdb_server ./data 6380
 
-# Terminal 2: talk to it with anything that speaks TCP text -- no custom
-# client required
+# talk to it from another terminal with anything that speaks plain TCP
 $ nc 127.0.0.1 6380
 PING
 +PONG
@@ -70,34 +69,34 @@ DELETE hello
 +OK
 ```
 
-Protocol: `PUT key value` / `GET key` / `DELETE key` / `PING`, each terminated by `\r\n` — Redis-inspired (including its `$-1` nil-reply convention for a missing key on `GET`) but not RESP-compatible; simple enough to drive by hand from `nc`, `telnet`, or PowerShell's `Test-NetConnection`.
+The protocol is `PUT key value` / `GET key` / `DELETE key` / `PING`, each line ending in `\r\n`. It's loosely inspired by Redis (the `$-1` for a missing key is a straight lift from `redis-cli`) but it's not RESP-compliant — just simple enough to poke at with `nc`, `telnet`, or PowerShell's `Test-NetConnection` without needing a real client.
 
-Kill the server process at any point after a client's `PUT` gets its `+OK`, restart it on the same data directory, reconnect, and every acknowledged write is still there — proven for real in `tests/server/server_crash_recovery_test.cpp`, the same hard-kill guarantee as the library-level test above, exercised this time through the actual network protocol against the actual server binary this project ships.
+Same crash guarantee as above, just proven through the network this time in `tests/server/server_crash_recovery_test.cpp`: kill the server after it acknowledges a write, restart it, reconnect, and the data's there.
 
-A concurrent-load benchmark client ships alongside it:
+There's also a small benchmark client:
 
 ```bash
 ./build/lsmdb_bench 127.0.0.1 6380 16 5000   # 16 concurrent clients, 5000 PUT+GET pairs each
 ```
 
-Measured on one development machine (see [`DESIGN.md`](DESIGN.md) Entry 6 for the full run): **~25,200 ops/sec** across 160,000 total operations, zero errors under concurrent load.
+On my laptop that gets roughly **25,200 ops/sec** across 160k total operations with zero errors under concurrent load (full numbers in [`DESIGN.md`](DESIGN.md), Entry 6).
 
-## Usage (replication, stretch goal)
+## Replication (the stretch goal)
 
-Any running `lsmdb_server` can act as a primary; a follower subscribes to it at startup:
+Any server can act as a primary. Point a second one at it and it becomes a follower:
 
 ```bash
-# Terminal 1: the primary
+# the primary
 ./build/lsmdb_server ./primary-data 7901
 
-# Terminal 2: a follower, replicating from the primary
+# a follower, replicating from it
 ./build/lsmdb_server ./follower-data 7902 --replica-of 127.0.0.1 7901
 ```
 
-The follower immediately receives a full snapshot of whatever the primary already had, then every subsequent write in real time, applied through the exact same durable write path a local client write takes — a follower's data is genuinely persisted to its own WAL and SSTables, not just mirrored in memory. It also rejects ordinary client writes (`-ERR this server is a read-only replica`): all of its data is meant to arrive via replication, never from a client connecting to the wrong server. Kill the primary process outright and the follower — a completely independent process, on its own data directory — still serves everything it had. See [`DESIGN.md`](DESIGN.md) Entry 7 for the full design log, including a real two-process run of exactly this.
+The follower pulls a full snapshot of whatever the primary already had, then gets every write after that in real time — and it writes everything through the same durable path a normal client write would use, so it's a real copy on disk, not just something held in memory. It also refuses direct writes from clients (`-ERR this server is a read-only replica`), since the whole point is that its data only comes from the primary. Kill the primary outright and the follower keeps everything it had. There's a full walkthrough of this with real terminal output in `DESIGN.md`, Entry 7.
 
-Deliberately scoped as a stretch goal, matching real primary-replica basics rather than full consensus: manual promotion only, no automatic failover or leader election.
+This is intentionally basic — manual promotion, no leader election, no failover. Wanted the real primary/replica idea without pretending I'd built Raft.
 
-## Why this project exists
+## Why I built this
 
-Most of my other public work (see [basketball_analysis](https://github.com/PranayGoel/basketball_analysis) and [coffee_shop_customer_service_chatbot](https://github.com/PranayGoel/coffee_shop_customer_service_chatbot)) is AI/LLM application work — calling models, orchestrating agents, wiring up RAG. This project is deliberately the opposite: no LLMs, no external APIs — just the classic systems-engineering problem of "how do you make writes fast, reads fast, and data durable, all at once, at scale." Built to demonstrate the concurrency/persistence/correctness-under-failure fundamentals that AI-application work alone doesn't exercise.
+The rest of my public projects ([basketball_analysis](https://github.com/PranayGoel/basketball_analysis), [coffee_shop_customer_service_chatbot](https://github.com/PranayGoel/coffee_shop_customer_service_chatbot)) are all AI/LLM stuff — calling models, wiring up agents, RAG pipelines. This one's the opposite on purpose. No LLMs, no APIs, just the actual systems problem of making writes fast, reads fast, and data durable at the same time. It's the kind of concurrency-and-correctness-under-failure work that doesn't really come up when you're mostly gluing API calls together, and I wanted something in my portfolio that shows I can do it.
