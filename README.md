@@ -96,7 +96,3 @@ Any server can act as a primary. Point a second one at it and it becomes a follo
 The follower pulls a full snapshot of whatever the primary already had, then gets every write after that in real time — and it writes everything through the same durable path a normal client write would use, so it's a real copy on disk, not just something held in memory. It also refuses direct writes from clients (`-ERR this server is a read-only replica`), since the whole point is that its data only comes from the primary. Kill the primary outright and the follower keeps everything it had. There's a full walkthrough of this with real terminal output in `DESIGN.md`, Entry 7.
 
 This is intentionally basic — manual promotion, no leader election, no failover. Wanted the real primary/replica idea without pretending I'd built Raft.
-
-## Why I built this
-
-The rest of my public projects ([basketball_analysis](https://github.com/PranayGoel/basketball_analysis), [coffee_shop_customer_service_chatbot](https://github.com/PranayGoel/coffee_shop_customer_service_chatbot)) are all AI/LLM stuff — calling models, wiring up agents, RAG pipelines. This one's the opposite on purpose. No LLMs, no APIs, just the actual systems problem of making writes fast, reads fast, and data durable at the same time. It's the kind of concurrency-and-correctness-under-failure work that doesn't really come up when you're mostly gluing API calls together, and I wanted something in my portfolio that shows I can do it.
